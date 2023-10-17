@@ -43,9 +43,16 @@ type Connection interface {
 	unlistAllQueues() error
 }
 
+type redisConnectionOption struct {
+	Prefix string
+}
+
+type Option func(*redisConnectionOption)
+
 // Connection is the entry point. Use a connection to access queues, consumers and deliveries
 // Each connection has a single heartbeat shared among all consumers
 type redisConnection struct {
+	namespace    string
 	Name         string
 	heartbeatKey string // key to keep alive
 	queuesKey    string // key to list of queues consumed by this connection
@@ -66,50 +73,62 @@ type redisConnection struct {
 	openQueues []Queue
 }
 
+func WithConnectionNamespace(namespace string) Option {
+	return func(rco *redisConnectionOption) {
+		rco.Prefix = namespace
+	}
+}
+
 // OpenConnection opens and returns a new connection
-func OpenConnection(tag string, network string, address string, db int, errChan chan<- error) (Connection, error) {
-	return OpenConnectionWithRedisOptions(tag, &redis.Options{Network: network, Addr: address, DB: db}, errChan)
+func OpenConnection(tag string, network string, address string, db int, errChan chan<- error, opts ...Option) (Connection, error) {
+	return OpenConnectionWithRedisOptions(tag, &redis.Options{Network: network, Addr: address, DB: db}, errChan, opts...)
 }
 
 // OpenConnectionWithRedisOptions allows you to pass more flexible options
-func OpenConnectionWithRedisOptions(tag string, redisOption *redis.Options, errChan chan<- error) (Connection, error) {
-	return OpenConnectionWithRedisClient(tag, redis.NewClient(redisOption), errChan)
+func OpenConnectionWithRedisOptions(tag string, redisOption *redis.Options, errChan chan<- error, opts ...Option) (Connection, error) {
+	return OpenConnectionWithRedisClient(tag, redis.NewClient(redisOption), errChan, opts...)
 }
 
 // OpenConnectionWithRedisClient opens and returns a new connection
 // This can be used to passa redis.ClusterClient.
-func OpenConnectionWithRedisClient(tag string, redisClient redis.Cmdable, errChan chan<- error) (Connection, error) {
-	return OpenConnectionWithRmqRedisClient(tag, RedisWrapper{redisClient}, errChan)
+func OpenConnectionWithRedisClient(tag string, redisClient redis.Cmdable, errChan chan<- error, opts ...Option) (Connection, error) {
+	return OpenConnectionWithRmqRedisClient(tag, RedisWrapper{redisClient}, errChan, opts...)
 }
 
 // OpenConnectionWithTestRedisClient opens and returns a new connection which
 // uses a test redis client internally. This is useful in integration tests.
-func OpenConnectionWithTestRedisClient(tag string, errChan chan<- error) (Connection, error) {
-	return OpenConnectionWithRmqRedisClient(tag, NewTestRedisClient(), errChan)
+func OpenConnectionWithTestRedisClient(tag string, errChan chan<- error, opts ...Option) (Connection, error) {
+	return OpenConnectionWithRmqRedisClient(tag, NewTestRedisClient(), errChan, opts...)
 }
 
 // OpenConnectionWithRmqRedisClient: If you would like to use a redis client other than the ones
 // supported in the constructors above, you can implement the RedisClient interface yourself
-func OpenConnectionWithRmqRedisClient(tag string, redisClient RedisClient, errChan chan<- error) (Connection, error) {
-	return openConnection(tag, redisClient, false, errChan)
+func OpenConnectionWithRmqRedisClient(tag string, redisClient RedisClient, errChan chan<- error, opts ...Option) (Connection, error) {
+	return openConnection(tag, redisClient, false, errChan, opts...)
 }
 
 // OpenClusterConnection: Same as OpenConnectionWithRedisClient, but using Redis hash tags {} instead of [].
-func OpenClusterConnection(tag string, redisClient redis.Cmdable, errChan chan<- error) (Connection, error) {
-	return openConnection(tag, RedisWrapper{redisClient}, true, errChan)
+func OpenClusterConnection(tag string, redisClient redis.Cmdable, errChan chan<- error, opts ...Option) (Connection, error) {
+	return openConnection(tag, RedisWrapper{redisClient}, true, errChan, opts...)
 }
 
-func openConnection(tag string, redisClient RedisClient, useRedisHashTags bool, errChan chan<- error) (Connection, error) {
+func openConnection(tag string, redisClient RedisClient, useRedisHashTags bool, errChan chan<- error, opts ...Option) (Connection, error) {
 	name := fmt.Sprintf("%s-%s", tag, RandomString(6))
+
+	connOpt := &redisConnectionOption{}
+	for _, opt := range opts {
+		opt(connOpt)
+	}
 
 	connection := &redisConnection{
 		Name:              name,
-		heartbeatKey:      strings.Replace(connectionHeartbeatTemplate, phConnection, name, 1),
-		queuesKey:         strings.Replace(connectionQueuesTemplate, phConnection, name, 1),
-		consumersTemplate: getTemplate(connectionQueueConsumersBaseTemplate, useRedisHashTags),
-		unackedTemplate:   getTemplate(connectionQueueUnackedBaseTemplate, useRedisHashTags),
-		readyTemplate:     getTemplate(queueReadyBaseTemplate, useRedisHashTags),
-		rejectedTemplate:  getTemplate(queueRejectedBaseTemplate, useRedisHashTags),
+		namespace:         connOpt.Prefix,
+		heartbeatKey:      strings.Replace(namespaced(connOpt.Prefix, connectionHeartbeatTemplate), phConnection, name, 1),
+		queuesKey:         strings.Replace(namespaced(connOpt.Prefix, connectionQueuesTemplate), phConnection, name, 1),
+		consumersTemplate: getTemplate(namespaced(connOpt.Prefix, connectionQueueConsumersBaseTemplate), useRedisHashTags),
+		unackedTemplate:   getTemplate(namespaced(connOpt.Prefix, connectionQueueUnackedBaseTemplate), useRedisHashTags),
+		readyTemplate:     getTemplate(namespaced(connOpt.Prefix, queueReadyBaseTemplate), useRedisHashTags),
+		rejectedTemplate:  getTemplate(namespaced(connOpt.Prefix, queueRejectedBaseTemplate), useRedisHashTags),
 		redisClient:       redisClient,
 		errChan:           errChan,
 		heartbeatStop:     make(chan chan struct{}, 1),
@@ -120,7 +139,7 @@ func openConnection(tag string, redisClient RedisClient, useRedisHashTags bool, 
 	}
 
 	// add to connection set after setting heartbeat to avoid race with cleaner
-	if _, err := redisClient.SAdd(connectionsKey, name); err != nil {
+	if _, err := redisClient.SAdd(connection.namespaced(connectionsKey), name); err != nil {
 		return nil, err
 	}
 
@@ -130,7 +149,7 @@ func openConnection(tag string, redisClient RedisClient, useRedisHashTags bool, 
 }
 
 func (connection *redisConnection) updateHeartbeat() error {
-	return connection.redisClient.Set(connection.heartbeatKey, "1", heartbeatDuration)
+	return connection.redisClient.Set(connection.namespaced(connection.heartbeatKey), "1", heartbeatDuration)
 }
 
 // heartbeat keeps the heartbeat key alive
@@ -189,7 +208,7 @@ func (connection *redisConnection) OpenQueue(name string) (Queue, error) {
 		return nil, ErrorConsumingStopped
 	}
 
-	if _, err := connection.redisClient.SAdd(queuesKey, name); err != nil {
+	if _, err := connection.redisClient.SAdd(connection.namespaced(queuesKey), name); err != nil {
 		return nil, err
 	}
 
@@ -206,7 +225,7 @@ func (connection *redisConnection) CollectStats(queueList []string) (Stats, erro
 
 // GetOpenQueues returns a list of all open queues
 func (connection *redisConnection) GetOpenQueues() ([]string, error) {
-	return connection.redisClient.SMembers(queuesKey)
+	return connection.redisClient.SMembers(connection.namespaced(queuesKey))
 }
 
 // StopAllConsuming stops consuming on all queues opened in this connection.
@@ -248,7 +267,7 @@ func (connection *redisConnection) StopAllConsuming() <-chan struct{} {
 
 // checkHeartbeat retuns true if the connection is currently active in terms of heartbeat
 func (connection *redisConnection) checkHeartbeat() error {
-	heartbeatKey := strings.Replace(connectionHeartbeatTemplate, phConnection, connection.Name, 1)
+	heartbeatKey := strings.Replace(connection.namespaced(connectionHeartbeatTemplate), phConnection, connection.Name, 1)
 	ttl, err := connection.redisClient.TTL(heartbeatKey)
 	if err != nil {
 		return err
@@ -261,15 +280,15 @@ func (connection *redisConnection) checkHeartbeat() error {
 
 // getConnections returns a list of all open connections
 func (connection *redisConnection) getConnections() ([]string, error) {
-	return connection.redisClient.SMembers(connectionsKey)
+	return connection.redisClient.SMembers(connection.namespaced(connectionsKey))
 }
 
 // hijackConnection reopens an existing connection for inspection purposes without starting a heartbeat
 func (connection *redisConnection) hijackConnection(name string) Connection {
 	return &redisConnection{
 		Name:              name,
-		heartbeatKey:      strings.Replace(connectionHeartbeatTemplate, phConnection, name, 1),
-		queuesKey:         strings.Replace(connectionQueuesTemplate, phConnection, name, 1),
+		heartbeatKey:      strings.Replace(namespaced(connection.namespace, connectionHeartbeatTemplate), phConnection, name, 1),
+		queuesKey:         strings.Replace(namespaced(connection.namespace, connectionQueuesTemplate), phConnection, name, 1),
 		consumersTemplate: connection.consumersTemplate,
 		unackedTemplate:   connection.unackedTemplate,
 		readyTemplate:     connection.readyTemplate,
@@ -280,7 +299,7 @@ func (connection *redisConnection) hijackConnection(name string) Connection {
 
 // closes a stale connection. not to be called on an active connection
 func (connection *redisConnection) closeStaleConnection() error {
-	count, err := connection.redisClient.SRem(connectionsKey, connection.Name)
+	count, err := connection.redisClient.SRem(connection.namespaced(connectionsKey), connection.Name)
 	if err != nil {
 		return err
 	}
@@ -314,6 +333,7 @@ func (connection *redisConnection) openQueue(name string) Queue {
 		connection.rejectedTemplate,
 		connection.redisClient,
 		connection.errChan,
+		redisQueueWithNamespace(connection.namespace),
 	)
 }
 
@@ -346,6 +366,17 @@ func (connection *redisConnection) flushDb() error {
 
 // unlistAllQueues closes all queues by removing them from the global list
 func (connection *redisConnection) unlistAllQueues() error {
-	_, err := connection.redisClient.Del(queuesKey)
+	_, err := connection.redisClient.Del(connection.namespaced(queuesKey))
 	return err
+}
+
+func (connection *redisConnection) namespaced(key string) string {
+	return namespaced(connection.namespace, key)
+}
+
+func namespaced(namespace, key string) string {
+	if namespace == "" {
+		return key
+	}
+	return fmt.Sprintf("%s::%s", namespace, key)
 }

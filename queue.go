@@ -45,6 +45,7 @@ type Queue interface {
 
 type redisQueue struct {
 	name           string
+	namespace      string
 	connectionName string
 	queuesKey      string // key to list of queues consumed by this connection
 	consumersKey   string // key to set of consumers using this connection
@@ -65,11 +66,20 @@ type redisQueue struct {
 	deliveryChan     chan Delivery // nil for publish channels, not nil for consuming channels
 }
 
+type redisQueueOption func(*redisQueue)
+
+func redisQueueWithNamespace(namespace string) redisQueueOption {
+	return func(queue *redisQueue) {
+		queue.namespace = namespace
+	}
+}
+
 func newQueue(
 	name, connectionName, queuesKey string,
 	consumersTemplate, unackedTemplate, readyTemplate, rejectedTemplate string,
 	redisClient RedisClient,
 	errChan chan<- error,
+	opts ...redisQueueOption,
 ) *redisQueue {
 
 	consumersKey := strings.Replace(consumersTemplate, phConnection, connectionName, 1)
@@ -98,6 +108,10 @@ func newQueue(
 		ackCtx:           ackCtx,
 		ackCancel:        ackCancel,
 	}
+	for _, opt := range opts {
+		opt(queue)
+	}
+
 	return queue
 }
 
@@ -537,7 +551,7 @@ func (queue *redisQueue) Destroy() (readyCount, rejectedCount int64, err error) 
 		return 0, 0, err
 	}
 
-	count, err := queue.redisClient.SRem(queuesKey, queue.name)
+	count, err := queue.redisClient.SRem(namespaced(queue.namespace, queuesKey), queue.name)
 	if err != nil {
 		return 0, 0, err
 	}
