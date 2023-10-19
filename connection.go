@@ -123,12 +123,12 @@ func openConnection(tag string, redisClient RedisClient, useRedisHashTags bool, 
 	connection := &redisConnection{
 		Name:              name,
 		namespace:         connOpt.Prefix,
-		heartbeatKey:      strings.Replace(namespaced(connOpt.Prefix, connectionHeartbeatTemplate), phConnection, name, 1),
-		queuesKey:         strings.Replace(namespaced(connOpt.Prefix, connectionQueuesTemplate), phConnection, name, 1),
-		consumersTemplate: getTemplate(namespaced(connOpt.Prefix, connectionQueueConsumersBaseTemplate), useRedisHashTags),
-		unackedTemplate:   getTemplate(namespaced(connOpt.Prefix, connectionQueueUnackedBaseTemplate), useRedisHashTags),
-		readyTemplate:     getTemplate(namespaced(connOpt.Prefix, queueReadyBaseTemplate), useRedisHashTags),
-		rejectedTemplate:  getTemplate(namespaced(connOpt.Prefix, queueRejectedBaseTemplate), useRedisHashTags),
+		heartbeatKey:      strings.Replace(connectionHeartbeatTemplate, phConnection, name, 1),
+		queuesKey:         strings.Replace(connectionQueuesTemplate, phConnection, name, 1),
+		consumersTemplate: getTemplate(connectionQueueConsumersBaseTemplate, useRedisHashTags),
+		unackedTemplate:   getTemplate(connectionQueueUnackedBaseTemplate, useRedisHashTags),
+		readyTemplate:     getTemplate(queueReadyBaseTemplate, useRedisHashTags),
+		rejectedTemplate:  getTemplate(queueRejectedBaseTemplate, useRedisHashTags),
 		redisClient:       redisClient,
 		errChan:           errChan,
 		heartbeatStop:     make(chan chan struct{}, 1),
@@ -326,11 +326,11 @@ func (connection *redisConnection) openQueue(name string) Queue {
 	return newQueue(
 		name,
 		connection.Name,
-		connection.queuesKey,
-		connection.consumersTemplate,
-		connection.unackedTemplate,
-		connection.readyTemplate,
-		connection.rejectedTemplate,
+		connection.namespaced(connection.queuesKey),
+		connection.namespaced(connection.consumersTemplate),
+		connection.namespaced(connection.unackedTemplate),
+		connection.namespaced(connection.readyTemplate),
+		connection.namespaced(connection.rejectedTemplate),
 		connection.redisClient,
 		connection.errChan,
 		redisQueueWithNamespace(connection.namespace),
@@ -378,5 +378,5 @@ func namespaced(namespace, key string) string {
 	if namespace == "" {
 		return key
 	}
-	return fmt.Sprintf("%s::%s", namespace, key)
+	return fmt.Sprintf("%s.%s", namespace, key)
 }

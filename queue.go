@@ -3,6 +3,7 @@ package rmq
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"strings"
 	"sync"
@@ -137,6 +138,7 @@ func (queue *redisQueue) PublishBytes(payload ...[]byte) error {
 
 // Remove elements with specific value from the queue (WARN: this operation is pretty slow with O(N+M) complexity where N is length of the queue and M is number of removed elements)
 func (queue *redisQueue) Remove(payload string, count int64, removeFromRejected bool) error {
+	log.Printf("REM %s", queue.readyKey)
 	_, err := queue.redisClient.LRem(queue.readyKey, count, payload)
 	if removeFromRejected {
 		queue.redisClient.LRem(queue.rejectedKey, count, payload)
